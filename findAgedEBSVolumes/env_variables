@@ -1,0 +1,6 @@
+#### IGNORE_WINDOW -- volumes with activity in this window will be ignored even if they are available; e.g. for a 30 day IGNORE_WINDOW, a volume detached 29 days ago will not be flagged, but a volume detached 31 days ago will. Value must be between 1 and 90
+#### SNS_ARN -- Full ARN for SNS topic to send notifications to, e.g. arn:aws:sns:us-west-1:123456789012:mySNStopic; this topic is also used to send detailed notifications when enabled
+#### SSM_AUTOMATION_ID -- SSM automation ID for actions to take on volumes which are non-compliant
+#### BATCH_SIZE -- size of batches of volumes to attach to a single Ops Item; this number can be between 1 and 100, inclusive; this value is also used if you are sending detailed notifications
+#### DETAILED_NOTIFICATIONS -- TRUE/FALSE, determines if detailed notifications are sent to SNS_ARN with the list of volumes found
+
