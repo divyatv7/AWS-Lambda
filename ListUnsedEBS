@@ -1,0 +1,59 @@
+import json
+import itertools
+from datetime import datetime, timezone
+import os, os.path, sys
+import boto3
+import botocore
+from botocore.exceptions import ClientError
+
+
+def getAvailableVolumes(ec2, rgn):
+    # returns list of volumes in 'available' state
+    availableVolList = []
+    filterList = [{'Name': 'status', 'Values': ['available']}]
+    response = ec2.describe_volumes(Filters=filterList, MaxResults=500)
+    for v in response['Volumes']:
+        availableVolList.append(v['VolumeId'])
+    while('NextToken' in response):
+        response = ec2.describe_volumes(Filters=filterList, MaxResults=500, NextToken=response['NextToken'])
+        for v in response['Volumes']:
+            availableVolList.append(v['VolumeId'])
+    return availableVolList
+
+def getCloudTrailEvents(volID, rgn):
+    cloudTrail = boto3.client('cloudtrail', region_name=rgn)
+    attrList = [{'AttributeKey': 'ResourceName', 'AttributeValue': volID}]
+    eventList = []
+    response = cloudTrail.lookup_events(LookupAttributes=attrList, MaxResults=1)
+    eventList += response['Events']
+    while('NextToken' in response):
+        response = cloudTrail.lookup_events(LookupAttributes=attrList, MaxResults=1, NextToken=response['NextToken'])
+        eventList += response['Events']
+    return eventList
+    
+def lambda_handler(event, context):
+
+    acctID = context.invoked_function_arn.split(":")[4]
+    ec2 = boto3.client('ec2')
+    #regions = [region['RegionName'] for region in ec2.describe_regions()['Regions']]
+    regions=["ap-south-1", "ap-southeast-1"]
+    for rgn in regions:
+        availableVolList=getAvailableVolumes(ec2, rgn)
+        unusedVolumesInfo = []
+        for volume in availableVolList:
+            for event in getCloudTrailEvents(volume, rgn):
+                d = {}
+                l=[]
+                if (event["EventName"] == "DetachVolume"):
+                    l.append(event["Username"])
+                    dt = event["EventTime"]
+                    timestamp = dt.strftime('%y-%m-%d %a %H:%M:%S')
+                    l.append(timestamp)
+                    for i in range(len(event["Resources"])):
+                        if(event["Resources"][i]["ResourceType"] == "AWS::EC2::Instance"):
+                            l.append(event["Resources"][i]["ResourceName"])
+                    d[volume] = l
+                    unusedVolumesInfo.append(d)
+                    break
+                
+        print("Unused volumes in " + str(rgn)+ " are " + str(unusedVolumesInfo))
