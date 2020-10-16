@@ -1,6 +1,6 @@
 import boto3
 import csv 
-# call s3 bucket
+# call s3 buckets
 s3 = boto3.resource('s3')
 bucket = s3.Bucket("test-abhi-01") # Enter your bucket name, e.g 'Data'
 # key path, e.g.'customer_profile/Reddit_Historical_Data.csv'
