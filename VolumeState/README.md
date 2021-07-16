@@ -1,0 +1,5 @@
+* Key Value
+* BATCH_SIZE	20
+* DETAILED_NOTIFICATIONS	TRUE
+* IGNORE_WINDOW	50
+* SNS_ARN	arn:aws:sns:us-east-1:1234567890123:Demo-EBSVolumes-Unused
