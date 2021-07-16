@@ -1,0 +1,184 @@
+import json
+import botocore
+import boto3
+from botocore.exceptions import ClientError
+import os, os.path, sys
+from base64 import b64decode
+from csv import reader
+
+assumed_arn = boto3.client('sts').get_caller_identity().get('Arn')
+line = assumed_arn.split('/')
+accountDetails = line[1].split('-')
+account = accountDetails[0]
+
+sts_client = boto3.client('sts')
+
+s3_client = boto3.client('s3')
+s3 = boto3.resource('s3')
+
+def getBucketList():
+    return s3_client.list_buckets()
+
+def getOldKMSId(keyAlias):
+    s3.Object('awsdne00-s3-unencrypted', 'key-rotation-update.csv').download_file('/tmp/encryptionList.csv')
+    # open file in read mode
+    with open('/tmp/encryptionList.csv', 'r') as read_obj:
+        # pass the file object to reader() to get the reader object
+        csv_reader = reader(read_obj)
+        # Iterate over each row in the csv using reader object
+        for row in csv_reader:
+            # row variable is a list that represents a row in csv
+            if row[0] == keyAlias:
+                print(row[1])
+                return row[1]
+
+
+def getEvent():
+    event = {
+        "eventVersion": "1.08",
+        "userIdentity": {
+            "type": "AssumedRole",
+            "principalId": "AROAUPEI6N5HJO6IGDURF:cckm-2e489f42-4cdf-4b35-b620-9f1291c82a92",
+            "arn": "arn:aws:sts::xxxxxxxx:assumed-role/awsdne00-cckm-test-role/cckm-xxf-4b35-b620-9f1291c82a92",
+            "accountId": "xxxxxxxxxxx",
+            "accessKeyId": "xxxxxxEx",
+            "sessionContext": {
+                "sessionIssuer": {
+                    "type": "Role",
+                    "principalId": "xxxxxN5HJO6IGDURF",
+                    "arn": "arn:aws:iam::xxxxxxx:role/awsdne00-cckm-test-role",
+                    "accountId": "xxxxxxxxxx",
+                    "userName": "awsdne00-cckm-test-role"
+                },
+                "webIdFederationData": {},
+                "attributes": {
+                    "mfaAuthenticated": "false",
+                    "creationDate": "2021-05-16T21:59:10Z"
+                }
+            }
+        },
+        "eventTime": "2021-05-16T21:59:10Z",
+        "eventSource": "kms.amazonaws.com",
+        "eventName": "UpdateAlias",
+        "awsRegion": "us-east-1",
+        "sourceIPAddress": "99.999.173.113",
+        "userAgent": "go/1.29.28 (go1.14.8; linux; amd64)",
+        "requestParameters": {
+            "aliasName": "alias/cckm_s3_test",
+            "targetKeyId": "xxxx-434e-b48f-11b2d09765e5"
+        },
+        "requestID": "xxxxxx-7d49xxx-9ece-3a697a2912e3",
+        "eventID": "xxxxx-b734-01e5494feff8",
+        "resources": [
+            {
+                "accountId": "xxxxx",
+                "type": "AWS::KMS::Key",
+                "ARN": "arn:aws:kms:us-east-1:xxxxxxxx:alias/divya-test"
+            },
+            {
+                "accountId": "xxxxx",
+                "type": "AWS::KMS::Key",
+                "ARN": "arn:aws:kms:us-east-1:xxxxx:key/xxxxxx-434e-b48f-11b2d09765e5"
+            }
+        ],
+        "eventType": "AwsApiCall",
+        "eventCategory": "Management",
+        "recipientAccountId": "xxxxxxx"
+    }
+    
+    return event
+    
+def lambda_handler(event, context):
+    # Mocking event
+    event = getEvent()
+    resources = event['resources']
+    keyAlias = resources[0]['ARN'].split('/')[1]
+    print(keyAlias)
+    print(account)
+    
+    newKey = resources[1]['ARN']
+    
+    oldKey = getOldKMSId(keyAlias)
+    requiredBuckets = []
+    allBuckets = []
+    response = getBucketList()
+    buckets = response['Buckets']
+    for bucket in buckets:
+        allBuckets.append(bucket['Name'])
+    for bucket in allBuckets:
+        try:
+            response = s3_client.get_bucket_encryption(Bucket=bucket)
+            rule = response['ServerSideEncryptionConfiguration']['Rules'][0]
+            if rule['ApplyServerSideEncryptionByDefault']['SSEAlgorithm'] == 'aws:kms':
+                if rule['ApplyServerSideEncryptionByDefault']['KMSMasterKeyID'] == oldKey:
+                    requiredBuckets.append(bucket)
+        except botocore.exceptions.ClientError as err:
+            pass
+    print(requiredBuckets)
+    
+    requiredKmsBuckets = []
+    for bucket in requiredBuckets:
+        response = s3_client.put_bucket_encryption(
+            Bucket=bucket,
+            ServerSideEncryptionConfiguration={
+                'Rules': [
+                    {
+                        'ApplyServerSideEncryptionByDefault': {
+                            'SSEAlgorithm': 'aws:kms',
+                            'KMSMasterKeyID': newKey
+                        }
+                    }
+                ]
+            }
+        )
+
+    for bucket in requiredBuckets:
+        response = s3_client.get_bucket_policy(
+            Bucket=bucket,
+        )
+        policy = response['Policy']
+        policyJSON = json.loads(policy)
+        statements = policyJSON["Statement"]
+        completeIamList = []
+        for statement in statements:
+            iamList = statement['Principal']['AWS']
+            completeIamList.extend(iamList)
+        crossRoles = list(set(completeIamList))
+        for role in crossRoles:
+            if account in role:
+                crossRoles.remove(role)
+        crossRoles.remove('*')
+        print(str(crossRoles))
+        
+    for role in crossRoles:
+        accountNumber = role.split(':')[4]
+        acct_b = sts_client.assume_role(
+            RoleArn='arn:aws:iam::' + accountNumber + ':role/cross-account-access-role',
+            RoleSessionName='CCKM-key-rotation-update',
+        )
+        ACCESS_KEY = acct_b['Credentials']['AccessKeyId']
+        SECRET_KEY = acct_b['Credentials']['SecretAccessKey']
+        SESSION_TOKEN = acct_b['Credentials']['SessionToken']
+    
+        # create service client using the assumed role credentials, e.g. S3
+        lambda_client = boto3.client(
+            'lambda',
+            aws_access_key_id=ACCESS_KEY,
+            aws_secret_access_key=SECRET_KEY,
+            aws_session_token=SESSION_TOKEN,
+        )
+    
+        inputDict = {"role": role, "newKey": newKey, "oldKey": oldKey}
+        inputBytes = json.dumps(inputDict).encode('utf-8')
+        response = lambda_client.invoke(
+            FunctionName="arn:aws:lambda:us-east-1:" + accountNumber + ":function:update-iam-policy-cckm",
+            InvocationType='RequestResponse',
+            Payload=inputBytes
+        )
+        
+    print(response)
+    
+    return {
+        'statusCode': 200,
+        'body': json.dumps('Lambda Success!')
+    }
