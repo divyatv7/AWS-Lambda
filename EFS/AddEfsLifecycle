@@ -1,0 +1,39 @@
+import boto3
+
+client = boto3.client('efs')
+
+def lambda_handler(event, context):
+    allEFS = client.describe_file_systems(
+        MaxItems=500,
+    )
+    for EFS in allEFS['FileSystems']:
+        filesystemid = EFS['FileSystemId']
+        print("Verifying Lifecycle Configuration for:" + filesystemid)
+        desc_lifecycle_response = client.describe_lifecycle_configuration(
+            FileSystemId=filesystemid
+        )
+        if len(desc_lifecycle_response["LifecyclePolicies"]) == 0:
+            print(filesystemid, "Empty Lifecycle Policy")
+            response = client.put_lifecycle_configuration(
+                FileSystemId=filesystemid,
+                LifecyclePolicies=[
+                    {
+                        'TransitionToIA': 'AFTER_30_DAYS'
+                    },
+                ]
+            )
+            print("LifeCyclePolicy Applied" + filesystemid)
+            create_tag_response = client.create_tags(
+                FileSystemId=filesystemid,
+                Tags=[
+                    {
+                        'Key': 'LifecycleGuardrail',
+                        'Value': 'Standard'
+                    },
+                ]
+            )
+            print("Tag Applied")
+        else:
+            print(filesystemid, "Has Lifecycle Policy")
+            
+        
