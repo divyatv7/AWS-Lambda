@@ -1,0 +1,98 @@
+import json
+import botocore
+import boto3
+from botocore.exceptions import ClientError
+import os, os.path, sys
+from base64 import b64decode
+
+assumed_arn = boto3.client('sts').get_caller_identity().get('Arn')
+list = assumed_arn.split('/')
+accountDetails = list[1].split('-')
+account = accountDetails[0]
+
+s3_client = boto3.client('s3')
+s3 = boto3.resource('s3')
+
+def getBucketList():
+    return s3_client.list_buckets()
+    
+def detailedNotifier(s3list):
+    # sends a list of unencrypted S3 buckets to the SNS topic
+    sns = boto3.client('sns')
+    message = s3list
+    if message:
+        buckets = '\n'.join(message)
+        try:
+            sns.publish(
+                TopicArn=os.environ["SNS_ARN"],
+                Subject="List of unencrypted S3 buckets in " + account,
+                Message=buckets
+            )
+        except ClientError as err:
+            print(err)
+    
+def lambda_handler(event, context):
+    bucketNames = []
+    unencrypted = []
+    notification = []
+    response = getBucketList()
+    buckets = response['Buckets']
+    for bucket in buckets:
+        bucketNames.append(bucket['Name'])
+    for bucket in bucketNames:
+        try:
+            s3_client.get_bucket_encryption(Bucket=bucket)
+        except botocore.exceptions.ClientError as err:
+            unencrypted.append(bucket)
+    remediate_buckets = unencrypted[:]
+    print("Unencrypted s3 buckets are" + str(unencrypted))
+    
+    # Removing the known unencrypted S3 buckets from the list
+    try:
+        remediate_buckets.remove('migration-s3-a')
+        remediate_buckets.remove('exported-logs')
+    except ValueError as ve:
+        pass
+
+    remediatedBuckets = [""]
+    remediatedBuckets.append("***** List of remediated Buckets *****")
+    notRemediatedBuckets = [""]
+    notRemediatedBuckets.append("***** List of the Buckets, which are not able to remediate *****")
+    for bucket in remediate_buckets:
+        try:
+            print("************** Adding encryption to bucket **************" + bucket)
+            response = s3_client.put_bucket_encryption(
+                Bucket= bucket,
+                ServerSideEncryptionConfiguration={
+                    'Rules': [
+                        {
+                            'ApplyServerSideEncryptionByDefault': {
+                                'SSEAlgorithm': 'aws:kms',
+                                'KMSMasterKeyID': str(os.environ["Key_ARN"])
+                            },
+                            #'BucketKeyEnabled': True
+                        }
+                    ]
+                }
+            )
+            remediatedBuckets.append(bucket)
+        except botocore.exceptions.ClientError as err:
+            print("**************** Not able to put bucket Encryption ****************" + bucket)
+            notRemediatedBuckets.append(bucket)
+
+    
+    if(os.environ["DETAILED_NOTIFICATIONS"].upper() == "TRUE"):
+        if  unencrypted:
+            notification.extend(unencrypted)
+            notification.extend(remediatedBuckets)
+            notification.extend(notRemediatedBuckets)
+            notification.append("\n\nIn case of any issues, please reach out to 'Cloud Team' \n\nThis Message is generated from CloudWatch Event 'S3-KMS-encryption-enable' through Lambda function 's3-encryption-enable' using SNS topic 'Demo-EBSVolumes-Unused'")
+            try:
+                print(detailedNotifier(notification))
+            except ClientError as err:
+                print(err)
+                
+    return {
+        'statusCode': 200,
+        'body': json.dumps('Success from Lambda!')
+    }
