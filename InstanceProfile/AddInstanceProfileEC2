@@ -1,0 +1,77 @@
+import boto3
+import json
+import os, os.path, sys
+
+
+def detailedNotifier(ec2list):
+    # sends a list of unencrypted S3 buckets to the SNS topic
+    sns = boto3.client('sns')
+    message = ec2list
+    if message:
+        instances = '\n'.join(message)
+        try:
+            sns.publish(
+                TopicArn=os.environ["SNS_ARN"],
+                Subject="List of EC2 instance without profile in "AWSDNE00",
+                Message=instances
+            )
+        except ClientError as err:
+            print(err)
+            
+def lambda_handler(event, context):
+    regionsList = ['us-east-1', 'us-east-2', 'us-west-1', 'us-west-2']
+    notification = []
+    list = []
+    for rgn in regionsList:
+        ec2 = boto3.resource('ec2', region_name=rgn)
+        client = boto3.client('ec2', region_name=rgn)
+        info = "\n" + "Applying Instance profile to the EC2 instance in region: " + rgn + "\n"
+        notification.append(info)
+        instanceList = []
+        
+        for instance in ec2.instances.all():
+            response = client.describe_iam_instance_profile_associations(
+                Filters=[
+                    {
+                        'Name': 'instance-id',
+                        'Values': [
+                            instance.id,
+                        ]
+                    },
+                    {
+                        'Name': 'state',
+                        'Values': [
+                            'associated',
+                            'associating'
+                        ]
+                    },
+                ],
+                MaxResults=123,
+            )
+            
+            if not len(response['IamInstanceProfileAssociations']):
+                instanceList.append(instance.id)
+                response = client.associate_iam_instance_profile(
+                    IamInstanceProfile={
+                        'Arn': 'arn:aws:iam::xxxxxxx:instance-profile/aws-base-ec2-role',
+                        'Name': 'aws-base-ec2-role'
+                    },
+                    InstanceId=instance.id
+                )
+        notification.extend(instanceList)
+        list.extend(instanceList)
+
+    print(notification)
+
+    if(os.environ["DETAILED_NOTIFICATIONS"].upper() == "TRUE"):
+        if list:
+            notification.append("\n\nIn case of any issues, please reach out to 'Cloud Team' \n\nThis Message is generated through Lambda function 'list-ec2-with-no-IAM-role' using SNS topic 'Demo-EBSVolumes-Unused'")
+            try:
+                print(detailedNotifier(notification))
+            except ClientError as err:
+                print(err)
+
+    return {
+        'statusCode': 200,
+        'body': json.dumps('Hello from Lambda!')
+    }
