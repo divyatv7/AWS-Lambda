@@ -1,0 +1,68 @@
+import json
+import boto3
+
+client = boto3.client('iam')
+resource = boto3.resource('iam')
+policy_resource = resource.Policy('arn')
+
+def lambda_handler(event, context):
+    # TODO implement
+    event = {
+    'role': 'arn:aws:iam::yyyyyyyyyy:role/iam-key-update',
+    'oldKey': 'arn:aws:kms:us-east-1:xxxxxxx:key/xxxxxx-0fe4-4b77-bf98-517c27c78bba',
+    'newKey': 'arn:aws:kms:us-east-1:xxxxxx:key/xxxxxxx-434e-b48f-11b2d09765e5'
+    }
+    #print("Lambda function success")
+    #print(event)
+    #print(context)
+    
+    policyNames = []
+    roleArn = event['role']
+    oldKey = event['oldKey']
+    newKey = event['newKey']
+    roleName = roleArn.rsplit('/', 1)[-1]
+
+    response = client.list_attached_role_policies(
+        RoleName=roleName,
+    )
+    
+    for i in range(len(response)-2):
+        policyNames.append(response['AttachedPolicies'][i]['PolicyArn'])
+    
+    for policy in policyNames:
+        p = resource.Policy(policy)
+        version = p.default_version
+        policyJson = version.document
+        count = 0
+        for s in policyJson['Statement']:
+            index = 0
+            for element in s['Resource']:
+                if oldKey == s['Resource'][index]:
+                    s['Resource'][index] = newKey
+                index = index + 1
+            policyJson['Statement'][count] = s
+            count = count + 1
+        
+        
+        response = client.list_policy_versions(
+            PolicyArn=policy
+        )
+        versions = response['Versions']
+        versionList = []
+        for version in versions:
+            versionList.append(int(version['VersionId'].lstrip('v')))
+        versionList.sort()
+        version = "v" + str(versionList[0])
+        policy_version = resource.PolicyVersion(policy,version)
+        
+        response = policy_version.delete()
+        policyName = policy.rsplit('/', 1)[-1]
+        response = p.create_version(
+            PolicyDocument=json.dumps(policyJson),
+            SetAsDefault=True
+        )
+
+    return {
+        'statusCode': 200,
+        'body': json.dumps('Lambda Success!')
+    }
