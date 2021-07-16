@@ -14,7 +14,7 @@ def detailedNotifier(s3list):
         try:
             sns.publish(
                 TopicArn=os.environ["SNS_ARN"],
-                Subject="List of S3 buckets without bucket poilicy in TFSAWSDNE01",
+                Subject="List of S3 buckets without bucket poilicy in AWSDNE00",
                 Message=instances
             )
         except botocore.exceptions.ClientError:
@@ -52,7 +52,7 @@ def lambda_handler(event, context):
 
     notification.extend(noPolicyBuckets)
     if(os.environ["DETAILED_NOTIFICATIONS"].upper() == "TRUE"):
-        notification.append("\n\nIn case of any issues, please reach out to 'TFS DCO Cloud Team' \n\nThis Message is generated through Lambda function 'list-ec2-with-no-IAM-role' using SNS topic 'Demo-EBSVolumes-Unused'")
+        notification.append("\n\nIn case of any issues, please reach out to 'Cloud Team' \n\nThis Message is generated through Lambda function 'list-ec2-with-no-IAM-role' using SNS topic 'Demo-EBSVolumes-Unused'")
         try:
             print(detailedNotifier(notification))
         except ClientError as err:
