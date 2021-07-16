@@ -1,0 +1,24 @@
+import json
+import boto3
+
+client = boto3.client('ec2')
+def lambda_handler(event, context):
+    volumeList = []
+    # replace file
+    with open('TestVolume.txt', 'r') as file: 
+        for line in file:
+            volumeList.append(line.rstrip('\n'))
+    print(volumeList)
+    # uncomment the below section to create volume tags
+    # multiple tags can be added by modifying Tags section
+    '''
+    response = client.create_tags(
+        Resources = volumeList,
+        Tags=[
+            {
+                'Key': 'Backup Type',
+                'Value': 'Decommission'
+            }
+        ]
+    )
+    '''
