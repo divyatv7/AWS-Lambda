@@ -1,0 +1,64 @@
+import boto3
+import os, os.path, sys
+from botocore.exceptions import ClientError
+
+# To get account Name and Number
+assumed_arn = boto3.client('sts').get_caller_identity().get('Arn')
+list = assumed_arn.split('/')
+accountDetails = list[1].split('-')
+account = accountDetails[0]
+
+def PrintVolumes(ec2_cli):
+    filters = [{'Name': 'volume-type','Values': ['gp2']},
+    {'Name': 'tag:ChangeVolumeType','Values': ['True']}]
+    result = ec2_cli.describe_volumes(Filters=filters)
+    volumes = []
+    for vol in result['Volumes']:
+        print(vol['VolumeId'])
+        volumes.append(vol['VolumeId'])
+    return volumes
+
+def detailedNotifier(ebsList):
+    # sends a list of gp2 EBS Volumes to the SNS topic
+    sns = boto3.client('sns')
+    message = ebsList
+    try:
+        sns.publish(
+            TopicArn=os.environ["SNS_ARN"],
+            Subject="List of gp2 EBS Volumes in " + account,
+            Message=message
+        )
+    except ClientError as err:
+        print(err)
+
+def lambda_handler(event, context):
+    regions = ['us-east-1', 'us-east-2', 'us-west-1', 'us-west-2']
+    allvolumes = ""
+    count = 0
+    for rgn in regions:
+        ec2_cli = boto3.client('ec2', region_name=rgn)
+        volumes = PrintVolumes(ec2_cli)
+        allvolumes += "Converting gp2 volumes to type gp3 in region " + rgn + ".\n"
+        allvolumes += str(volumes) + "\n\n"
+        for volume in volumes:
+            count += 1
+            try:
+                response = ec2_cli.modify_volume(
+                    VolumeId=volume,
+                    VolumeType='gp3',
+                    Iops=3000, 
+                    Throughput=125
+                )
+            except ClientError as err:
+                allvolumes += "error for Volume: " + volume
+                allvolumes += "\n" + str(err) + "\n\n"
+                pass
+
+    if(os.environ["DETAILED_NOTIFICATIONS"].upper() == "TRUE"):
+        if count > 0:
+            allvolumes += "\n\nIn case of any issues, please reach out to 'Cloud Team' \n\nThis Message is generated from CloudWatch Event ' ' through Lambda function 'ebs-gp2-to-gp3' using SNS topic 'Demo-EBSVolumes-Unused'"
+            try:
+                detailedNotifier(allvolumes)
+            except ClientError as err:
+                print(err)
+                
