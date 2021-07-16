@@ -1,0 +1,33 @@
+import json
+import boto3
+
+ec2 = boto3.resource('ec2')
+
+def lambda_handler(event, context):
+    volumeId = event['detail']['requestParameters']['volumeId']
+    instance = event['detail']['requestParameters']['instanceId']
+    eventTime = event['detail']['eventTime']
+    user = event['detail']['userIdentity']['arn']
+    volume = ec2.Volume(volumeId)
+    volume.create_tags(
+        Tags=[
+            {
+                'Key': 'DetachedFromInstance',
+                'Value': instance
+            },
+            {
+                'Key': 'DetachedBy',
+                'Value': user
+            },
+            {
+                'Key': 'DetachedTime',
+                'Value': eventTime
+            }, 
+        ]
+    )
+    
+    
+    return {
+        'statusCode': 200,
+        'body': json.dumps('Lambda Success')
+    }
