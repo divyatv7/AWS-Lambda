@@ -1,0 +1,52 @@
+import boto3
+import botocore
+import json
+import os, os.path, sys
+
+client = boto3.client('s3')
+
+def detailedNotifier(s3list):
+    # sends a list of unencrypted S3 buckets to the SNS topic
+    sns = boto3.client('sns')
+    message = s3list
+    if message:
+        instances = '\n'.join(message)
+        try:
+            sns.publish(
+                TopicArn=os.environ["SNS_ARN"],
+                Subject="List of S3 buckets without bucket poilicy in AWSDNE00",
+                Message=instances
+            )
+        except botocore.exceptions.ClientError:
+            print(err)
+            
+def lambda_handler(event, context):
+    notification = []
+    buckets = []
+    noPolicyBuckets = []
+    response = client.list_buckets()
+    for bucket in response['Buckets']:
+        buckets.append(bucket["Name"])
+        
+    for bucket in buckets:
+        try:
+            response = client.get_bucket_policy(
+                Bucket=bucket
+            )
+            print(bucket)
+        except botocore.exceptions.ClientError:
+            noPolicyBuckets.append(bucket)
+            
+    notification.extend(noPolicyBuckets)
+    
+    if(os.environ["DETAILED_NOTIFICATIONS"].upper() == "TRUE"):
+        notification.append("\n\nIn case of any issues, please reach out to 'Cloud Team' \n\nThis Message is generated through Lambda function 'list-ec2-with-no-IAM-role' using SNS topic 'Demo-EBSVolumes-Unused'")
+        try:
+            print(detailedNotifier(notification))
+        except ClientError as err:
+            print(err)
+            
+    return {
+        'statusCode': 200,
+        'body': json.dumps('Hello from Lambda!')
+    }
