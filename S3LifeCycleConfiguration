@@ -1,36 +1,173 @@
-import json
 import boto3
+import botocore
+import json
+import os, os.path, sys
 
 s3 = boto3.resource('s3')
-bucket_lifecycle_configuration = s3.BucketLifecycleConfiguration('bucket_name')
+s3_client = boto3.client('s3')
+
+
+# To get account Name and Number
+assumed_arn = boto3.client('sts').get_caller_identity().get('Arn')
+list = assumed_arn.split('/')
+accountDetails = list[1].split('-')
+account = accountDetails[0]
+accountNumber = boto3.client('sts').get_caller_identity().get('Account')
+prodAccounts = ["1234567890", "xxxxxxxxx"] 
+
+def PutBucketLifeCycleConfiguration(noLifeCycleBuckets):
+    bucketStatus = []
+    remediatedBuckets = ["\n"+"\nAdded Lifecycle Policy to the buckets below:"]
+    notRemediatedBuckets = ["\n"+"\nNot able to put Lifecycle policy to buckets:"]
+    for bucketName in noLifeCycleBuckets:
+        bucket_lifecycle_configuration = s3.BucketLifecycleConfiguration(bucketName)
+        
+        # Applying tag to buckets as 'bucket_lifecycle_configuration.put' in boto3 module it expects a Tag 
+        bucket_tagging = s3.BucketTagging(bucketName)
+        try:
+            tags = bucket_tagging.tag_set
+        except botocore.exceptions.ClientError as error:
+            tags = []
+    
+        tags.append({'Key':'Lifecycle', 'Value': 'Standard'})
+            
+        try:
+            Set_Tag = bucket_tagging.put(Tagging={'TagSet':tags})
+        except botocore.exceptions.ClientError as error:
+            print("**************** Not able to put tag to the bucket ****************" + bucketName)
+        
+        if accountNumber in prodAccounts:
+            try:
+                print("Applying Life cycle configuration to Bucket =" + bucketName)
+                response = bucket_lifecycle_configuration.put(
+                    LifecycleConfiguration={
+                        'Rules': [
+                            {
+                                'ID': 'LifecycleConfiguration',
+                                'Filter': {
+                                    # This is to encrypt all the objects in the Bucket
+                                    # https://github.com/boto/boto3/issues/2718
+                                    'Prefix': '',
+                                },
+                                'Status': 'Enabled',
+                                'Transitions': [
+                                    {
+                                        'Days': 30,
+                                        'StorageClass': 'INTELLIGENT_TIERING'
+                                    }
+                                ],
+                                'NoncurrentVersionTransitions': [
+                                    {
+                                        'NoncurrentDays': 30,
+                                        'StorageClass': 'GLACIER'
+                                    },
+                                    {
+                                        'NoncurrentDays': 120,
+                                        'StorageClass': 'DEEP_ARCHIVE'
+                                    },
+                                ],
+                            }
+                        ]
+                    }
+                )
+                remediatedBuckets.append(bucketName)
+            except botocore.exceptions.ClientError as error:
+                print("************ Not able to Put Life cycle to Bucket ************" + bucketName)
+                notRemediatedBuckets.append(bucketName)
+        else:
+            try:
+                print("Applying Life cycle configuration to Bucket =" + bucketName)
+                response = bucket_lifecycle_configuration.put(
+                    LifecycleConfiguration={
+                        'Rules': [
+                            {
+                                'ID': 'LifecycleConfiguration',
+                                'Filter': {
+                                    # This is to encrypt all the objects in the Bucket
+                                    # https://github.com/boto/boto3/issues/2718
+                                    'Prefix': '',
+                                },
+                                'Status': 'Enabled',
+                                'Transitions': [
+                                    {
+                                        'Days': 30,
+                                        'StorageClass': 'INTELLIGENT_TIERING'
+                                    }
+                                ],
+                                'NoncurrentVersionTransitions': [
+                                    {
+                                        'NoncurrentDays': 30,
+                                        'StorageClass': 'GLACIER'
+                                    },
+                                ],
+                                # Only for sub-prod expire after 120 days for non-current
+                                'NoncurrentVersionExpiration': {
+                                    'NoncurrentDays': 120
+                                }
+                            }
+                        ]
+                    }
+                )
+                remediatedBuckets.append(bucketName)
+            except botocore.exceptions.ClientError as error:
+                print("************ Not able to Put Lifecycle to bucket ************" + bucketName)
+                notRemediatedBuckets.append(bucketName)
+        
+    bucketStatus.extend(remediatedBuckets)
+    bucketStatus.extend(notRemediatedBuckets)
+    return bucketStatus
 
 def lambda_handler(event, context):
-   response = bucket_lifecycle_configuration.put(
-    LifecycleConfiguration={
-        'Rules': [
-            {
-                'ID': 'LifecycleConfiguration',
-                'Status': 'Enabled',
-                'Transitions': [
-                    {
-                        'Days': 123,
-                        'StorageClass': 'INTELLIGENT_TIERING'
-                    },
-                ],
-                'NoncurrentVersionTransitions': [
-                    {
-                        'NoncurrentDays': 123,
-                        'StorageClass': 'STANDARD_IA'
-                    },
-                    {
-                        'NoncurrentDays': 123,
-                        'StorageClass': 'GLACIER'
-                    },
-                ],
-                'NoncurrentVersionExpiration': {
-                    'NoncurrentDays': 123
-                },
-            },
-        ]
-    },
- )
+    notification = []
+    buckets = s3.buckets.all()
+    count = 0
+    noLifeCycleBuckets = []
+    
+    # Number of Buckets in the Account
+    for bucket in buckets:
+        count = count + 1
+
+    print("Total Number of buckets in this Account = "+str(count))
+
+    # get the list of buckets without a Lifecycle configuration    
+    for bucket in buckets:
+        try:
+            response = s3_client.get_bucket_lifecycle(
+                Bucket=bucket.name,
+            )
+        except botocore.exceptions.ClientError as error:
+            print("****************Bucket with no lifecycle ****************" + bucket.name)
+            noLifeCycleBuckets.append(bucket.name)
+    
+    # Apply LifeCycle Configuration for buckets 
+    bucketStatus = PutBucketLifeCycleConfiguration(noLifeCycleBuckets)
+        
+    if(os.environ["DETAILED_NOTIFICATIONS"].upper() == "TRUE"):
+        if noLifeCycleBuckets:
+            notification.extend(noLifeCycleBuckets)
+            notification.extend(bucketStatus)
+            notification.append("\n\nIn case of any issues, please reach out to 'Cloud Team' \n\nThis Message is generated from CloudWatch event 's3-KMS-encryption-enable' through Lambda function 's3-encryption-enable' using SNS topic 's3-guardrails'")
+            try:
+                print(detailedNotifier(notification))
+            except ClientError as err:
+                print(err)
+            
+def detailedNotifier(s3list):
+    # sends a list of S3 buckets witout Lifecycle Policy to the SNS topic
+    sns = boto3.client('sns')
+    message = s3list
+    if message:
+        buckets = '\n'.join(message)
+        try:
+            sns.publish(
+                TopicArn=os.environ["SNS_ARN"],
+                Subject="List of S3 buckets without LifeCycle Policy in " + account,
+                Message=buckets
+            )
+        except ClientError as err:
+            print(err)
+            
+    return {
+        'statusCode': 200,
+        'body': json.dumps('Success from Lambda!')
+    }
