@@ -1,0 +1,142 @@
+
+import json
+import itertools
+import datetime
+import os, os.path, sys
+import boto3
+import botocore
+from botocore.exceptions import ClientError
+import csv
+
+s3 = boto3.resource('s3')
+key = 'unusedEBS/unusedEBS.csv'
+date = datetime.datetime.now()
+reports_bucket = s3.Bucket("awsdne00-s3-unen")
+
+def getAvailableVolumes(ec2, rgn):
+    # returns list of volumes in 'available' state
+    availableVolList = []
+    filterList = [{'Name': 'status', 'Values': ['available']}]
+    response = ec2.describe_volumes(Filters=filterList, MaxResults=500)
+    for v in response['Volumes']:
+        availableVolList.append(v['VolumeId'])
+    while('NextToken' in response):
+        response = ec2.describe_volumes(Filters=filterList, MaxResults=500, NextToken=response['NextToken'])
+        for v in response['Volumes']:
+            availableVolList.append(v['VolumeId'])
+    return availableVolList
+
+def getPV(ec2, rgn):
+    # returns list of volumes in 'available' state
+    pvVolList = []
+    filterList = [{'Name': 'tag-key', 'Values': ['kubernetes.io/created-for/pv/name']}]
+    response = ec2.describe_volumes(Filters=filterList, MaxResults=500)
+    for v in response['Volumes']:
+        pvVolList.append(v['VolumeId'])
+    while('NextToken' in response):
+        response = ec2.describe_volumes(Filters=filterList, MaxResults=500, NextToken=response['NextToken'])
+        for v in response['Volumes']:
+            pvVolList.append(v['VolumeId'])
+    return pvVolList
+    
+def getCloudTrailEvents(volID, rgn, startDateTime):
+    cloudTrail = boto3.client('cloudtrail', region_name=rgn)
+    attrList = [{'AttributeKey': 'ResourceName', 'AttributeValue': volID}]
+    eventList = []
+    response = cloudTrail.lookup_events(LookupAttributes=attrList, StartTime=startDateTime, MaxResults=1)
+    eventList += response['Events']
+    while('NextToken' in response):
+        response = cloudTrail.lookup_events(LookupAttributes=attrList, StartTime=startDateTime, MaxResults=1, NextToken=response['NextToken'])
+        eventList += response['Events']
+    return eventList
+    
+def detailedNotifier(volList):
+    # sends a list of unencrypted S3 buckets to the SNS topic
+    sns = boto3.client('sns')
+    message = volList
+    try:
+        response = sns.publish(
+            TopicArn=os.environ["SNS_ARN"],
+            Message=message,
+        )
+        return response
+    except ClientError as err:
+        print(err)    
+        
+def lambda_handler(event, context):
+
+    acctID = context.invoked_function_arn.split(":")[4]
+    allUnusedVol = []
+    #regions = [region['RegionName'] for region in ec2.describe_regions()['Regions']]
+    regions=["us-east-1", "us-east-2", "us-west-1", "us-west-2"]
+    for rgn in regions:
+        ec2 = boto3.client('ec2', region_name=rgn)
+        availableVolList = getAvailableVolumes(ec2, rgn)
+        print("Unused volumes in " + str(rgn)+ " are " + str(availableVolList))
+        unusedVolumesInfo = []
+        today = str(date.month) + "-" + str(date.day) + "-" + str(date.year)   
+        unusedVolumesInfo.append(today)
+        unusedVolumesInfo.append(acctID)
+        unusedVolumesInfo.append(rgn)
+        unusedVolumesInfo.append(str(availableVolList))
+        pvVolList = getPV(ec2, rgn)
+        unusedVolumesInfo.append(str(pvVolList))
+        for volume in availableVolList:
+            # If volume is detached in past 90 days,
+            # Get Instace ID, Username and Timestamp of Volume
+            startDateTime = datetime.datetime.today() - datetime.timedelta(int(os.environ["IGNORE_WINDOW"])) # IGNORE_WINDOW defined in environment variable
+            for event in getCloudTrailEvents(volume, rgn, startDateTime):
+                d = {} #d is empty dictionary
+                l = [] #l is empty list
+                if (event["EventName"] == "DetachVolume"):
+                    l.append(event["Username"])
+                    dt = event["EventTime"]
+                    timestamp = dt.strftime('%y-%m-%d %a %H:%M:%S')
+                    l.append(timestamp)
+                    for i in range(len(event["Resources"])):
+                        if(event["Resources"][i]["ResourceType"] == "AWS::EC2::Instance"):
+                            l.append(event["Resources"][i]["ResourceType"])
+                            l.append(event["Resources"][i]["ResourceName"])
+                    d[volume] = l
+                    unusedVolumesInfo.append(d)
+                    break
+                else:
+                    # If the Volume is not detached in past 90 days,
+                    #just get the user name and volume ID
+                    l.append(event["Username"])
+                    dt = event["EventTime"]
+                    timestamp = dt.strftime('%y-%m-%d %a %H:%M:%S')
+                    l.append(timestamp)
+                    d[volume] = l
+                    unusedVolumesInfo.append(d)
+                    break
+                
+                #if not bool(event):
+                #    unusedVolumesInfo.append(volume)
+                
+        print("Unused volumes information in " + str(rgn)+ " are " + str(unusedVolumesInfo))
+        allUnusedVol.append(str(availableVolList))
+        allUnusedVol.append(str(unusedVolumesInfo))
+        
+        #download unusedEBS csv file lo lambda tmp folder
+        local_file_name = '/tmp/test.csv'
+        s3.Bucket("awsdne00-s3-une").download_file(key,local_file_name)
+        
+        # write the data into '/tmp' folder
+        with open('/tmp/test.csv','r') as infile:
+            reader = list(csv.reader(infile))
+            reader = reader[::-1] # the data is ascending order in file
+            reader.insert(0,unusedVolumesInfo)
+        with open('/tmp/test.csv', 'w', newline='') as outfile:
+            writer = csv.writer(outfile)
+            for line in reversed(reader): #reverse order
+                writer.writerow(line)
+        
+        # upload file from tmp to EBS key
+        reports_bucket.upload_file('/tmp/test.csv', key)
+        
+    if(os.environ["DETAILED_NOTIFICATIONS"].upper() == "TRUE"):
+        try:
+            print(detailedNotifier(str(allUnusedVol)))
+        except ClientError as err:
+            print(err) 
